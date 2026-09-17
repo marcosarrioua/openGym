@@ -5,13 +5,16 @@ The classic self-hosted install ships as two containers behind one nginx (see
 both — nginx serving the app and the Node API on a second, internal port. Everything lives on
 one HTTPS origin, which is what the passkey/WebAuthn flow and the signed session cookie require.
 
-It's the cheapest way to put openGym on Render (one Starter instance, one small persistent
-disk) and there is no second service to proxy between — `/api` goes straight to
-`127.0.0.1` inside the container.
+It's the cheapest way to put openGym on Render (one instance, no second service to proxy
+between — `/api` goes straight to `127.0.0.1` inside the container): instances can sleep, so
+with the optional durable mirror below even the **free** plan keeps your data between
+spin-downs (see §3).
 
 > Costs (Hobby workspace, as of 2026): one Starter web service ~$7/mo + one 1 GB persistent
-> disk ~$0.25/mo. Free instances can't attach a persistent disk and lose `/data` on every
-> restart, so a personal install with real workouts should be paid.
+> disk ~$0.25/mo. The **free** plan costs $0 but has an ephemeral filesystem — local files
+> are wiped on every spin-down (15 min without traffic) — and only 750 wake-hours/month, so
+> it is a good fit **only** with the remote JSON mirror configured (and you accept the
+> ~1-minute cold start).
 
 ## What this deployment is
 
@@ -19,7 +22,9 @@ disk) and there is no second service to proxy between — `/api` goes straight t
 Browser ──► https://<you>.onrender.com  (nginx, port 10000)
                  │  static app  (frontend/dist)
                  │  /api/*  ────► 127.0.0.1:3000  (node server.js)
-                 │                                   └── /data  (persistent disk)
+                 │                                   └── /data  (files — keep, don't lose)
+                 │                                   └── remote table (PostgREST, optional)
+                 │                                      → survives free-plan spin-downs
                  │  images/GIFs ─────────────────► jsDelivr CDN (not from Render)
 ```
 
@@ -32,7 +37,9 @@ Deployment-relevant files:
   `BACKEND=127.0.0.1`, so no DNS resolution is needed), starts nginx, then runs
   `node server.js` on port 3000 as PID 1.
 
-No application code is modified — the guide only adds the two files above.
+Application code changes are limited to two small additions, both harmless when unconfigured:
+`BOOTSTRAP_ADMIN` in `api/server.js` (first registered user becomes admin — the no-shell
+bootstrap in §4) and `api/remote-store.js`, the optional durable JSON mirror (§3 → Free plan).
 
 ## 1. Prerequisites
 
@@ -48,8 +55,11 @@ No application code is modified — the guide only adds the two files above.
    - **Environment**: `Docker`
    - **Dockerfile Path**: `render/Dockerfile`
    - **Region**: any (pick the one closest to you; internal traffic is irrelevant here).
-   - **Plan**: **Starter** (needed for the persistent disk).
-3. **Disk persistence** → **Add Disk**: mount path `/data`, size `1 GB`.
+   - **Plan**: **Starter** if you want the persistent disk, or **Free** if you instead use
+     the remote JSON mirror from §3 (a free instance spins down after 15 idle minutes and
+     takes ~1 minute to wake; two caveats in §4).
+3. **Disk persistence** → **Add Disk**: mount path `/data`, size `1 GB` — *Starter only*, and
+   only if you are not using the remote mirror.
    (A disk disables zero-downtime redeploys — a deploy restarts the instance for a few
    seconds. Fine for a single user. Disk size can be increased later but never decreased.)
 4. **Health Check Path**: `/api/health`.
@@ -64,11 +74,41 @@ Render will build the image. Watch the logs: the container is up when you see
 |---|---|
 | `RP_ID` | `<you>.onrender.com` — must equal the hostname in the address bar exactly |
 | `ORIGIN` | `https://<you>.onrender.com` |
-| `DATA_DIR` | `/data` (the disk mount) |
+| `DATA_DIR` | `/data` (the disk mount, if you have one) |
 | `ALLOW_GUEST` | `0` — no "Continue without account" entrance |
 | `VAPID_SUBJECT` | `mailto:you@example.com` — a real address so Web Push is accepted |
 | `VITE_IMG_BASE` | the images CDN URL (see below, optional — the Dockerfile has a default) |
 | `VITE_GIF_BASE` | the GIFs CDN URL (see below, optional) |
+| `REMOTE_URL` | **Free plan only** — your PostgREST table base URL (see below) |
+| `REMOTE_KEY` | **Free plan only** — the *service_role* secret for that table |
+
+### Free plan — the durable mirror
+
+A free instance's filesystem is wiped every time it spins down, so `/data` on its own is not
+enough. `api/remote-store.js` mirrors the JSON documents (users, credentials, invites, push
+subscriptions, session secret, VAPID keys and every profile's state) into a PostgREST table;
+at boot the API re-hydrates `/data` from it before serving, so a spin-down followed by a cold
+start is invisible to the data.
+
+Setup (any Postgres with PostgREST works; Supabase's free tier is the low-friction option):
+
+1. [supabase.com](https://supabase.com) → **New project** (free). Skip the starter SQL.
+2. **SQL Editor → New query** and run:
+   ```sql
+   create table if not exists app_data (
+     key         text primary key,
+     val         jsonb not null,
+     updated_at  timestamptz not null default now()
+   );
+   ```
+   (The service_role key bypasses row-level security, so no policies are needed.)
+3. **Project Settings → API** and copy the **Project URL** and the **`service_role` secret.**
+4. On Render set `REMOTE_URL=https://<ref>.supabase.co` and `REMOTE_KEY=<service_role>`,
+   then **Save, rebuild, and deploy**.
+
+Boot, writes and data all round-trip through this table; the rows are literally the same JSON
+files, so a future migration back to files is a copy/paste. Without these two variables the
+mirror stays completely off and everything behaves exactly as the file-only self-host.
 
 A ready-to-import template with these values commented lives at `render/.env.example`
 (Settings → Environment → "Add from .env").
@@ -111,6 +151,14 @@ your uid:
 5. Future accounts: from the Admin screen (`#/admin`) mint invite codes and hand them out.
    Existing accounts are unaffected when the toggle is flipped.
 
+> **Free-plan realities** (skip on paid): the instance spins down after 15 idle minutes — the
+> first visit after idle shows a ~1-minute Render loading page while it wakes; and an account's
+> *passkey* works on the cold start only if you use the same browser/device that created it
+> (nothing is cached server-side). Also, a workspace shares 750 wake-hours/month across all its
+> free services — if the app is pinged 24/7 it runs out partway through the month and pauses
+> until the 1st. Data is safe between sleep/wake rounds as long as the durable mirror is on
+> (each write is mirrored within a second).
+
 ## 5. Notifications (rest-timer & reminders)
 
 The API generates VAPID keys into `/data/vapid.json` on first boot — the disk keeps them, so
@@ -123,10 +171,15 @@ push services reject `mailto:admin@localhost`.
 `/data` holds everything that matters (`db.json`, per-user state, `secret`, `vapid.json`,
 `audit.log`):
 
-- Render snapshots the disk once a day and keeps 7 days — usable to restore after corruption.
+- With the durable mirror on, the **remote table is your backup**: it already contains every
+  document, so back it up too (Supabase dashboard → Database → table viewer is enough for a
+  quick look).
+- On Starter: Render snapshots the disk once a day and keeps 7 days — usable to restore after
+  corruption.
 - In-app: Settings → export/backup downloads your state; keep a copy somewhere of your own.
-- Human backup: everything is JSON in `/data`, so a nightly copy of that folder to your own
-  storage is all that's needed (see `SELF_HOSTING.md` §6 for the same `tar czf` ritual).
+- Human backup: everything is JSON, so a nightly copy of that folder (or of the remote table's
+  rows) to your own storage is all that's needed (see `SELF_HOSTING.md` §6 for the same
+  `tar czf` ritual). Note that `audit.log` is the only file NOT mirrored remotely.
 
 ## 7. Updating
 
@@ -138,8 +191,10 @@ redeploys. A few seconds of downtime because of the disk; your data is untouched
 | Item | Cost |
 |---|---|
 | Workspace (Hobby) | $0 |
+| **Free web service** (needs the remote mirror) | $0 |
 | Starter web service | ~$7/mo |
 | 1 GB persistent disk | ~$0.25/mo |
+| Supabase free (Project + PostgREST table) | $0 |
 
 - Exercise images are served from the CDN, so outbound bandwidth stays trivial.
 - The AI Coach is not included (its runtime dependency is skipped in this image) and its UI

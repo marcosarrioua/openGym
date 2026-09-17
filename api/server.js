@@ -18,6 +18,7 @@ import { coachRoutes } from './coach/routes.js';
 import { startCadence } from './coach/cadence.js';
 import { startWarmup } from './coach/warmup.js';
 import { dayReminderPush, restTimerPush, testPush } from './push-messages.js';
+import * as remote from './remote-store.js';
 import { verifyError } from './verify-error.js';
 
 const PORT = +(process.env.PORT || 3000);
@@ -66,7 +67,7 @@ const lock = f => { try { fs.chmodSync(path.join(DATA, f), 0o600); } catch { /* 
 /* ---------- secret + db ---------- */
 const secretFile = path.join(DATA, 'secret');
 if (!fs.existsSync(secretFile)) fs.writeFileSync(secretFile, crypto.randomBytes(32).toString('hex'), { mode: 0o600 });
-const SECRET = fs.readFileSync(secretFile, 'utf8').trim();
+let SECRET = fs.readFileSync(secretFile, 'utf8').trim();
 
 const dbFile = path.join(DATA, 'db.json');
 let db = { users: [], creds: [], subs: [], invites: [] };
@@ -76,7 +77,7 @@ db.invites = db.invites || [];
 const isAdmin = user => !!user && (user.admin === true || ADMIN_UIDS.includes(user.id));
 // 0600: db.json holds passkey credential material. It used to be covered by a blanket 0700 on
 // the whole directory; now that the directory stays traversable, the file carries its own mode.
-function saveDb() { atomicWrite(dbFile, JSON.stringify(db, null, 2), 0o600); }
+function saveDb() { atomicWrite(dbFile, JSON.stringify(db, null, 2), 0o600); remote.put('db', db); }
 function atomicWrite(file, content, mode) {
   const tmp = file + '.tmp';
   fs.writeFileSync(tmp, content, mode ? { mode } : undefined);
@@ -94,6 +95,36 @@ try { vapid = JSON.parse(fs.readFileSync(vapidFile, 'utf8')); }
 catch { vapid = webpush.generateVAPIDKeys(); fs.writeFileSync(vapidFile, JSON.stringify(vapid), { mode: 0o600 }); }
 const VAPID_SUBJECT = process.env.VAPID_SUBJECT || (SECURE ? ORIGIN : 'mailto:admin@localhost');
 webpush.setVapidDetails(VAPID_SUBJECT, vapid.publicKey, vapid.privateKey);
+
+/* ---------- durable mirror (see remote-store.js) ----------
+   On an ephemeral filesystem (Render free: every spin-down wipes /data) the remote table is
+   the only thing that survives, so when REMOTE_URL/REMOTE_KEY are set the remote snapshot
+   wins over whatever empty files a fresh instance happens to see. This block re-hydrates the
+   local files from it BEFORE any request is served; on a filesystem that already has data
+   (a normal self-host) both copies exist and the remote one is the more recent by design,
+   so it still takes precedence. A boot-time hydrate failure (typ. the table is not ready)
+   logs loudly and starts degraded on local files rather than refusing to boot. */
+if (remote.enabled()) {
+  try { await remote.hydrate(); }
+  catch (e) { console.error('[remote] hydrate failed — proceeding on local files:', e.message); }
+  const ks = remote.memory();
+  if (ks.has('db')) { db = ks.get('db'); db.subs = db.subs || []; db.invites = db.invites || []; }
+  if (ks.has('secret')) SECRET = ks.get('secret');
+  if (ks.has('vapid')) { vapid = ks.get('vapid'); webpush.setVapidDetails(VAPID_SUBJECT, vapid.publicKey, vapid.privateKey); }
+  for (const [k, v] of ks) {
+    if (k.startsWith('state:')) atomicWrite(stateFile(k.slice(6)), JSON.stringify(v));
+  }
+  // Rewrite the files the rest of the process reads (state cache stats, coach, admin, MCP).
+  fs.writeFileSync(secretFile, SECRET, { mode: 0o600 });
+  fs.writeFileSync(dbFile, JSON.stringify(db, null, 2), { mode: 0o600 });
+  fs.writeFileSync(vapidFile, JSON.stringify(vapid), { mode: 0o600 });
+  // Mirror whatever the remote table did not have yet (fresh table / first boot): the
+  // hydrated values become authoritative, and the local-only ones get pushed up so a
+  // spin-down on an ephemeral disk cannot lose them.
+  if (!ks.has('db')) remote.put('db', db);
+  if (!ks.has('secret')) remote.put('secret', SECRET);
+  if (!ks.has('vapid')) remote.put('vapid', vapid);
+}
 
 /* A push subscription's `endpoint` is a URL this server connects out to, chosen by whoever is
    signed in — so without a check /api/push/* is a request-forgery lever, and the api container
@@ -895,6 +926,7 @@ const routes = {
     delete body.state.active;              // in-progress workouts stay device-local
     body.state._rev = curRev + 1;          // server-owned; whatever the client sent is ignored
     atomicWrite(stateFile(user.id), JSON.stringify(body.state));
+    remote.put('state:' + user.id, body.state);
     json(res, 200, { ok: true, ts: body.state._ts || null, rev: body.state._rev });
   },
 

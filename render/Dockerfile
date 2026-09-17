@@ -33,7 +33,7 @@ WORKDIR /app/api
 COPY api/package.json api/package-lock.json* ./
 # Coach's optional runtime (the Claude Agent SDK) is deliberately not installed: it stays inert.
 RUN npm ci --omit=dev --omit=optional && npm cache clean --force
-COPY api/server.js api/push-messages.js api/verify-error.js ./
+COPY api/server.js api/push-messages.js api/verify-error.js api/remote-store.js ./
 COPY api/coach ./coach
 
 COPY web/nginx.conf.template /etc/nginx/templates/default.conf.template
