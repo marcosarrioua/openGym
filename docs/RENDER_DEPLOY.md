@@ -70,6 +70,9 @@ Render will build the image. Watch the logs: the container is up when you see
 | `VITE_IMG_BASE` | the images CDN URL (see below, optional — the Dockerfile has a default) |
 | `VITE_GIF_BASE` | the GIFs CDN URL (see below, optional) |
 
+A ready-to-import template with these values commented lives at `render/.env.example`
+(Settings → Environment → "Add from .env").
+
 Defaults baked into the Dockerfile that you normally don't touch: `BACKEND=127.0.0.1`,
 `PORT=3000` (node's port), `NGINX_PORT=10000` (Render's public port), `RESOLVER=127.0.0.11`,
 `CF_CONNECTING_IP=""`.
@@ -93,20 +96,20 @@ pushes to the watched branch; both setups are fine.
 ## 4. First account + click "invite only"
 
 The instance starts with registrations open (`INVITE_ONLY` unset) so the **first** account can
-be created — there is no admin yet to mint an invite code. Close it behind you afterwards:
+be created — there is no admin yet to mint an invite code. `BOOTSTRAP_ADMIN=1` makes that first
+account an admin (sets `user.admin`) automatically, so you never need Render shell access or
+your uid:
 
-1. Visit `https://<you>.onrender.com` and **create your profile** with a passkey.
-2. Render service page → **Shell** → read your user id:
-   ```bash
-   cat /data/db.json
-   ```
-   Copy the `id` of the user you just created (a base64url string under `users[0].id`).
-3. In the service's **Environment**, set `ADMIN_UIDS=<your-id>` and `INVITE_ONLY=1`, then
-   **Save, rebuild, and deploy**.
+1. Set `BOOTSTRAP_ADMIN=1` in the service's **Environment** (it's in `render/.env.example`).
+2. Visit `https://<you>.onrender.com` and **create your profile** with a passkey. Because the
+   database is empty, your account is born as admin.
+3. In the service's **Environment**, add `INVITE_ONLY=1` (you can keep or drop
+   `BOOTSTRAP_ADMIN` — it only ever affects the very first user), then **Save, rebuild, and
+   deploy**.
 4. Verify: `https://<you>.onrender.com/api/config` returns `{"invite_only":true,
    "allow_guest":false,…}`. The login screen no longer offers "Continue without account".
-5. Future accounts: from the Admin screen (`#/admin`, guarded by `ADMIN_UIDS`) mint invite
-   codes and hand them out. Existing accounts are unaffected when the toggle is flipped.
+5. Future accounts: from the Admin screen (`#/admin`) mint invite codes and hand them out.
+   Existing accounts are unaffected when the toggle is flipped.
 
 ## 5. Notifications (rest-timer & reminders)
 

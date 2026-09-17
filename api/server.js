@@ -29,6 +29,11 @@ const RP_NAME = process.env.RP_NAME || 'openGym';
 // code the admin generates. Both default off so a fresh self-hosted instance stays open.
 const ADMIN_UIDS = (process.env.ADMIN_UIDS || '').split(',').map(s => s.trim()).filter(Boolean);
 const INVITE_ONLY = /^(1|true|yes|on)$/i.test(process.env.INVITE_ONLY || '');
+// Single-owner bootstrap: when set and the database is still empty, the FIRST account to
+// register is granted user.admin. That is how an instance on a host without shell access
+// (Render) gives its owner the Admin screen without them ever reading their uid out of
+// db.json. Idempotent: it only ever applies to that first user, so the flag can stay or go.
+const BOOTSTRAP_ADMIN = /^(1|true|yes|on)$/i.test(process.env.BOOTSTRAP_ADMIN || '');
 // Guest mode ("Continue without account") keeps everything in the browser and never touches this
 // server — but on an instance meant for a known set of people, an entrance nobody can walk back
 // out of is still the wrong front door (#42). Default ON, so existing instances are unchanged;
@@ -718,6 +723,7 @@ const routes = {
       }
     }
     const user = { id: c.uid, name: c.name, created: new Date().toISOString() };
+    if (BOOTSTRAP_ADMIN && db.users.length === 0) user.admin = true;
     if (invite) { user.invitedBy = invite.code; invite.usedBy = user.id; invite.usedAt = user.created; }
     db.users.push(user);
     db.creds.push({
